@@ -1,0 +1,44 @@
+{
+  "name": "@rudycity/codebase-wiki-generator",
+  "version": "1.0.0",
+  "description": "Multi-dimensional codebase wiki generation, C4 architecture diagrams, ERD extraction, API cataloging, and automatic real-time synchronization suite for Single and Federated Multi-Workspace projects.",
+  "main": "scripts/sync-wiki-on-change.cjs",
+  "bin": {
+    "wiki-scaffold": "./scripts/generate-wiki-scaffold.cjs",
+    "wiki-sync": "./scripts/sync-wiki-on-change.cjs",
+    "wiki-watch": "./scripts/watch-and-sync.cjs",
+    "wiki-validate-links": "./scripts/validate-wiki-links.cjs",
+    "wiki-validate-freshness": "./scripts/validate-wiki-freshness.cjs",
+    "wiki-extract-api": "./scripts/extract-api-catalog.cjs",
+    "wiki-extract-erd": "./scripts/extract-db-erd.cjs",
+    "wiki-rmemory": "./scripts/sync-wiki-to-rmemory.cjs",
+    "wiki-hooks": "./scripts/setup-git-hooks.cjs"
+  },
+  "scripts": {
+    "scaffold": "node scripts/generate-wiki-scaffold.cjs",
+    "sync": "node scripts/sync-wiki-on-change.cjs",
+    "watch": "node scripts/watch-and-sync.cjs",
+    "validate:links": "node scripts/validate-wiki-links.cjs",
+    "validate:freshness": "node scripts/validate-wiki-freshness.cjs",
+    "extract:api": "node scripts/extract-api-catalog.cjs",
+    "extract:erd": "node scripts/extract-db-erd.cjs",
+    "rmemory": "node scripts/sync-wiki-to-rmemory.cjs",
+    "setup:hooks": "node scripts/setup-git-hooks.cjs"
+  },
+  "keywords": [
+    "antigravity-skill",
+    "ai-agents",
+    "codebase-wiki",
+    "documentation",
+    "c4-model",
+    "erd-generator",
+    "api-catalog",
+    "auto-sync",
+    "multi-workspace"
+  ],
+  "author": "RudyCity",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
