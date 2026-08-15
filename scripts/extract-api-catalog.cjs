@@ -2,8 +2,9 @@
 
 /**
  * extract-api-catalog.cjs
- * Parses backend API routes (Hono, Express, Fastify, Next.js, etc.) across
- * primary and federated workspaces, generating structured API Catalog tables.
+ * High-Performance Multi-Workspace API Catalog Extractor:
+ * Parses backend API routes (Hono, Express, Fastify, Next.js, NestJS, Elysia, etc.)
+ * across primary and federated workspaces, generating structured markdown API Catalog tables.
  * 
  * Usage:
  *   node extract-api-catalog.cjs [--config <file>] [--routes-dir <dir>] [--output <file>] [--update-wiki]
@@ -14,7 +15,7 @@ const path = require('path');
 
 const args = process.argv.slice(2);
 let configFile = 'docs/wiki/wiki-config.json';
-let routesDirs = null;
+let customRoutesDirs = null;
 let outputFile = null;
 let updateWiki = false;
 let wikiPath = 'docs/wiki/03-api-and-contracts.md';
@@ -23,7 +24,7 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === '--config' || args[i] === '-c') {
     configFile = args[++i];
   } else if (args[i] === '--routes-dir' || args[i] === '-r') {
-    routesDirs = [args[++i]];
+    customRoutesDirs = [args[++i]];
   } else if (args[i] === '--output' || args[i] === '-o') {
     outputFile = args[++i];
   } else if (args[i] === '--update-wiki' || args[i] === '-u') {
@@ -50,6 +51,18 @@ Options:
 
 const rootDir = process.cwd();
 
+function getProjectIdentity(dir) {
+  try {
+    const pkgPath = path.join(dir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (pkg.name) return { name: pkg.name, displayName: pkg.description || pkg.name };
+    }
+  } catch (_) {}
+  const base = path.basename(dir);
+  return { name: base, displayName: base };
+}
+
 // Load wiki-config.json if available
 let config = null;
 const resolvedConfigPath = path.resolve(rootDir, configFile);
@@ -61,269 +74,275 @@ if (fs.existsSync(resolvedConfigPath)) {
   }
 }
 
-// Build workspaces list
+const defaultPrimaryIdentity = getProjectIdentity(rootDir);
+
 const workspaces = [];
 if (config && config.primaryWorkspace) {
+  const pwDir = path.resolve(rootDir, config.primaryWorkspace.path || '.');
+  const pwIdentity = getProjectIdentity(pwDir);
   workspaces.push({
-    name: config.primaryWorkspace.name || 'smart-seller',
-    displayName: config.primaryWorkspace.displayName || 'Primary Core (smart-seller)',
-    baseDir: path.resolve(rootDir, config.primaryWorkspace.path || '.'),
-    routes: config.primaryWorkspace.routes || ['apps/api/src/routes', 'apps/api/src']
+    name: config.primaryWorkspace.name || pwIdentity.name,
+    displayName: config.primaryWorkspace.displayName || pwIdentity.displayName,
+    baseDir: pwDir,
+    routes: config.primaryWorkspace.routes || [
+      'apps/api/src/routes',
+      'apps/api/src',
+      'src/routes',
+      'src/api',
+      'routes',
+      'api'
+    ]
   });
 
   if (Array.isArray(config.federatedWorkspaces)) {
     for (const fw of config.federatedWorkspaces) {
-      if (fw.path && fs.existsSync(path.resolve(rootDir, fw.path))) {
-        workspaces.push({
-          name: fw.name || path.basename(fw.path),
-          displayName: fw.displayName || `Federated: ${fw.name}`,
-          baseDir: path.resolve(rootDir, fw.path),
-          routes: fw.routes || ['backend/src/routes', 'src/routes', 'routes']
-        });
+      if (fw.path) {
+        const fwDir = path.resolve(rootDir, fw.path);
+        if (fs.existsSync(fwDir)) {
+          const fwIdentity = getProjectIdentity(fwDir);
+          workspaces.push({
+            name: fw.name || fwIdentity.name,
+            displayName: fw.displayName || `Federated: ${fwIdentity.displayName}`,
+            baseDir: fwDir,
+            routes: fw.routes || [
+              'backend/src/routes',
+              'src/routes',
+              'routes',
+              'api'
+            ]
+          });
+        }
       }
     }
   }
 } else {
-  // Fallback single workspace
   workspaces.push({
-    name: 'smart-seller',
-    displayName: 'Primary Core (smart-seller)',
+    name: defaultPrimaryIdentity.name,
+    displayName: defaultPrimaryIdentity.displayName,
     baseDir: rootDir,
-    routes: routesDirs || ['apps/api/src/routes', 'apps/api/src', 'src/routes', 'routes', 'api']
+    routes: customRoutesDirs || [
+      'apps/api/src/routes',
+      'apps/api/src',
+      'src/routes',
+      'src/api',
+      'app/api',
+      'routes',
+      'api',
+      'server/routes'
+    ]
   });
 }
 
 function scanFileForRoutes(filePath, relPath, workspaceBaseDir, workspaceName) {
-  const content = fs.readFileSync(filePath, 'utf8');
+  let content;
+  try {
+    content = fs.readFileSync(filePath, 'utf8');
+  } catch (_) {
+    return [];
+  }
+
   const lines = content.split('\n');
+  const endpoints = [];
+  const normalizedRelPath = relPath.replace(/\\/g, '/');
 
-  // Multi-language Route Pattern Matchers:
-  // 1. JS/TS (Express, Hono, Fastify, Nest, Koa, Elysia, etc.)
-  const jsRouteRegex = /(?:app|router|assistant|auth|platform|inbox|orders|products|skills|tenants|webhooks|admin|buyer|checkout|oauth|partner|cms|ticket|api|server|v1|v2)\.(get|post|put|patch|delete|all|options|head)\s*\(\s*['"`]([^'"`]+)['"`]/i;
-  // 2. Python (FastAPI, Flask, Django, Litestar)
-  const pyRouteRegex = /@(?:app|router|api|bp|blueprint)\.(get|post|put|patch|delete|route)\s*\(\s*['"`]([^'"`]+)['"`]/i;
-  // 3. Go (Gin, Fiber, Echo, Chi, Standard Mux)
-  const goRouteRegex = /(?:r|router|app|api|group|v1|e|mux)\.(GET|POST|PUT|PATCH|DELETE|Handle|HandleFunc)\s*\(\s*['"`]([^'"`]+)['"`]/;
-  // 4. Rust (Actix-web, Axum, Rocket)
-  const rustRouteRegex = /(?:#\[(?:get|post|put|patch|delete)\s*\(\s*['"`]([^'"`]+)['"`]\s*\)\]|\.route\s*\(\s*['"`]([^'"`]+)['"`]\s*,\s*(get|post|put|patch|delete))/i;
-  // 5. PHP (Laravel, Symfony)
-  const phpRouteRegex = /Route::(get|post|put|patch|delete|any)\s*\(\s*['"`]([^'"`]+)['"`]/i;
-  // 6. Java/Kotlin (Spring Boot, Quarkus)
-  const javaRouteRegex = /@(Get|Post|Put|Patch|Delete)Mapping\s*\(\s*(?:value\s*=\s*)?['"`]([^'"`]+)['"`]/i;
-  // 7. C# (.NET Minimal APIs / Controllers)
-  const csharpRouteRegex = /(?:app\.Map(Get|Post|Put|Patch|Delete)\s*\(\s*['"`]([^'"`]+)['"`]|\[Http(Get|Post|Put|Patch|Delete)\s*\(\s*['"`]([^'"`]+)['"`]\s*\])/i;
+  // Route extraction patterns across popular Node / TS frameworks
+  const patterns = [
+    // Hono / Express: app.get('/path', ...), router.post('/path', ...), r.put('/path', ...)
+    /(?:app|router|r|api|v1|v2|route|auth|assistant|webhook|admin)\.(get|post|put|delete|patch|options|head)\s*\(\s*['"`]([^'"`]+)['"`]/gi,
+    // Method chained: .get('/path', ...).post('/path', ...)
+    /\.(get|post|put|delete|patch|options|head)\s*\(\s*['"`]([^'"`]+)['"`]/gi,
+    // Next.js App Router: export async function GET(req), export function POST(
+    /export\s+(?:async\s+)?function\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(/g,
+    // NestJS: @Get('path'), @Post('path')
+    /@(Get|Post|Put|Delete|Patch|Head|Options)\s*\(\s*['"`]?([^'"`]*)['"`]?\s*\)/gi
+  ];
 
-  const results = [];
-  for (let idx = 0; idx < lines.length; idx++) {
-    const line = lines[idx];
-    let method = '';
-    let rawPath = '';
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    const line = lines[lineIdx];
 
-    // Match JS/TS
-    const jsMatch = line.match(jsRouteRegex);
-    if (jsMatch) {
-      method = jsMatch[1].toUpperCase();
-      rawPath = jsMatch[2];
-    }
+    // Pattern 1 & 2: Express / Hono / Fastify
+    for (const pat of [patterns[0], patterns[1]]) {
+      pat.lastIndex = 0;
+      let match;
+      while ((match = pat.exec(line)) !== null) {
+        const method = match[1].toUpperCase();
+        let routePath = match[2];
 
-    // Match Python
-    if (!method) {
-      const pyMatch = line.match(pyRouteRegex);
-      if (pyMatch) {
-        method = (pyMatch[1] === 'route' ? 'GET' : pyMatch[1]).toUpperCase();
-        rawPath = pyMatch[2];
-      }
-    }
-
-    // Match Go
-    if (!method) {
-      const goMatch = line.match(goRouteRegex);
-      if (goMatch) {
-        method = goMatch[1].toUpperCase();
-        rawPath = goMatch[2];
-      }
-    }
-
-    // Match Rust
-    if (!method) {
-      const rustMatch = line.match(rustRouteRegex);
-      if (rustMatch) {
-        if (rustMatch[1]) {
-          method = 'GET'; // attribute macro default
-          rawPath = rustMatch[1];
-        } else if (rustMatch[2] && rustMatch[3]) {
-          rawPath = rustMatch[2];
-          method = rustMatch[3].toUpperCase();
+        // Clean up sub-route prefixes if relative
+        if (!routePath.startsWith('/') && !routePath.startsWith('*')) {
+          routePath = '/' + routePath;
         }
+
+        // Infer auth & guards
+        let authGuard = 'Public';
+        const contextWindow = lines.slice(Math.max(0, lineIdx - 3), Math.min(lines.length, lineIdx + 5)).join(' ');
+        if (/auth|jwt|requireAuth|bearer|adminOnly|superadmin|verifyToken|authenticate|authMiddleware/i.test(contextWindow)) {
+          authGuard = 'Bearer JWT';
+        } else if (/hmac|signature|webhookSecret/i.test(contextWindow)) {
+          authGuard = 'HMAC SHA256';
+        }
+
+        // Infer description from nearby comments
+        let description = '';
+        if (lineIdx > 0 && lines[lineIdx - 1].trim().startsWith('//')) {
+          description = lines[lineIdx - 1].replace(/^\/\/\s*/, '').trim();
+        } else if (lineIdx > 0 && lines[lineIdx - 1].trim().startsWith('*')) {
+          description = lines[lineIdx - 1].replace(/^\*\s*/, '').trim();
+        }
+
+        endpoints.push({
+          method,
+          path: routePath,
+          file: normalizedRelPath,
+          line: lineIdx + 1,
+          auth: authGuard,
+          description: description || `Endpoint handler in ${path.basename(filePath)}`,
+          workspace: workspaceName
+        });
       }
     }
 
-    // Match PHP
-    if (!method) {
-      const phpMatch = line.match(phpRouteRegex);
-      if (phpMatch) {
-        method = phpMatch[1].toUpperCase();
-        rawPath = phpMatch[2];
-      }
-    }
+    // Pattern 3: Next.js App Router handler
+    patterns[2].lastIndex = 0;
+    let nextMatch;
+    while ((nextMatch = patterns[2].exec(line)) !== null) {
+      const method = nextMatch[1].toUpperCase();
+      // Derive route path from file directory
+      let routePath = '/' + normalizedRelPath
+        .replace(/^(app|src\/app)\//, '')
+        .replace(/\/route\.(ts|js|tsx|jsx)$/, '');
 
-    // Match Java / Spring
-    if (!method) {
-      const javaMatch = line.match(javaRouteRegex);
-      if (javaMatch) {
-        method = javaMatch[1].toUpperCase();
-        rawPath = javaMatch[2];
-      }
-    }
-
-    // Match C#
-    if (!method) {
-      const csMatch = line.match(csharpRouteRegex);
-      if (csMatch) {
-        method = (csMatch[1] || csMatch[3] || 'GET').toUpperCase();
-        rawPath = csMatch[2] || csMatch[4] || '/';
-      }
-    }
-
-    if (method && rawPath) {
-      // Determine auth guard from surrounding context
-      let authGuard = 'Public';
-      const lineLower = line.toLowerCase();
-      if (lineLower.includes('auth') || lineLower.includes('token') || lineLower.includes('guard') || lineLower.includes('jwt') || lineLower.includes('protect') || lineLower.includes('depends(get_current_user)')) {
-        authGuard = 'Authenticated (JWT)';
-      } else if (lineLower.includes('superadmin') || lineLower.includes('super_admin')) {
-        authGuard = 'Superadmin Role';
-      } else if (lineLower.includes('tenantadmin') || lineLower.includes('tenant_admin')) {
-        authGuard = 'Tenant Admin';
-      } else if (relPath.includes('platform') || relPath.includes('admin')) {
-        authGuard = 'Platform Admin';
-      } else if (lineLower.includes('partner') || relPath.includes('partner')) {
-        authGuard = 'Partner Role';
-      }
-
-      let description = '';
-      if (idx > 0 && (lines[idx - 1].trim().startsWith('//') || lines[idx - 1].trim().startsWith('#'))) {
-        description = lines[idx - 1].trim().replace(/^(?:\/\/|#)\s*/, '');
-      } else if (idx > 0 && lines[idx - 1].trim().startsWith('*')) {
-        description = lines[idx - 1].trim().replace(/^\*\s*/, '');
-      } else if (idx > 0 && lines[idx - 1].trim().startsWith('"""')) {
-        description = lines[idx - 1].trim().replace(/^"""\s*/, '');
-      }
-
-      results.push({
-        workspace: workspaceName,
+      endpoints.push({
         method,
-        path: rawPath,
-        authGuard,
-        description: description || `Handler for ${method} ${rawPath}`,
-        file: relPath.replace(/\\/g, '/'),
-        fullPath: filePath.replace(/\\/g, '/'),
-        line: idx + 1
+        path: routePath,
+        file: normalizedRelPath,
+        line: lineIdx + 1,
+        auth: /auth|session|token|user/i.test(content) ? 'Session / JWT' : 'Public',
+        description: `Next.js App Route handler`,
+        workspace: workspaceName
       });
     }
   }
-  return results;
+
+  return endpoints;
 }
 
-const sourceFileExtensions = ['.ts', '.js', '.mjs', '.cjs', '.py', '.go', '.rs', '.php', '.java', '.cs'];
-
-function traverseDir(dir, workspaceBaseDir, workspaceName) {
-  const detected = [];
-  if (!fs.existsSync(dir)) return detected;
+function walkDir(dir, baseDir, fileList = []) {
+  if (!fs.existsSync(dir)) return fileList;
   const entries = fs.readdirSync(dir, { withFileTypes: true });
+
   for (const ent of entries) {
     const full = path.join(dir, ent.name);
-    if (ent.isDirectory() && ent.name !== 'node_modules' && ent.name !== 'dist' && ent.name !== '.git' && ent.name !== '__pycache__' && ent.name !== 'target' && ent.name !== 'vendor') {
-      detected.push(...traverseDir(full, workspaceBaseDir, workspaceName));
-    } else if (ent.isFile()) {
-      const ext = path.extname(ent.name).toLowerCase();
-      if (sourceFileExtensions.includes(ext)) {
-        const rel = path.relative(workspaceBaseDir, full);
-        detected.push(...scanFileForRoutes(full, rel, workspaceBaseDir, workspaceName));
+    if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === 'dist' || ent.name === 'build') {
+      continue;
+    }
+    if (ent.isDirectory()) {
+      walkDir(full, baseDir, fileList);
+    } else if (/\.(ts|js|tsx|jsx|mjs|cjs)$/.test(ent.name) && !ent.name.endsWith('.d.ts')) {
+      fileList.push({
+        fullPath: full,
+        relPath: path.relative(baseDir, full)
+      });
+    }
+  }
+  return fileList;
+}
+
+const allEndpoints = [];
+
+for (const ws of workspaces) {
+  console.log(`🔍 Scanning workspace: ${ws.displayName} (${ws.baseDir})`);
+  let wsEndpointsCount = 0;
+
+  for (const relRouteDir of ws.routes) {
+    const targetDir = path.resolve(ws.baseDir, relRouteDir);
+    if (fs.existsSync(targetDir)) {
+      const files = walkDir(targetDir, ws.baseDir);
+      for (const f of files) {
+        const found = scanFileForRoutes(f.fullPath, f.relPath, ws.baseDir, ws.name);
+        allEndpoints.push(...found);
+        wsEndpointsCount += found.length;
       }
     }
   }
-  return detected;
+  console.log(`  -> Found ${wsEndpointsCount} endpoint(s) in ${ws.displayName}`);
 }
 
-console.log(`🔎 Scanning API routes across ${workspaces.length} workspace(s)...`);
+// Deduplicate endpoints by workspace + method + path
+const deduped = [];
+const seen = new Set();
 
-const catalogByWorkspace = new Map();
-let grandTotal = 0;
+for (const ep of allEndpoints) {
+  const key = `${ep.workspace}:${ep.method}:${ep.path}`;
+  if (!seen.has(key)) {
+    seen.add(key);
+    deduped.push(ep);
+  }
+}
+
+// Sort: Workspace -> Path -> Method
+deduped.sort((a, b) => {
+  if (a.workspace !== b.workspace) return a.workspace.localeCompare(b.workspace);
+  if (a.path !== b.path) return a.path.localeCompare(b.path);
+  return a.method.localeCompare(b.method);
+});
+
+console.log(`\n📊 Total Unique Endpoints Discovered: ${deduped.length}`);
+
+// Generate Markdown Table
+let md = `## 📡 Automated API Route Catalog\n\n`;
+md += `> Auto-generated by \`codebase-wiki-generator\` across ${workspaces.length} workspace(s). Total endpoints: **${deduped.length}**.\n\n`;
 
 for (const ws of workspaces) {
-  console.log(`\n📦 Scanning Workspace: ${ws.displayName} (${ws.baseDir})`);
-  const wsEndpoints = [];
-  for (const d of ws.routes) {
-    const fullDir = path.resolve(ws.baseDir, d);
-    if (fs.existsSync(fullDir)) {
-      console.log(`  - Checking: ${d}`);
-      wsEndpoints.push(...traverseDir(fullDir, ws.baseDir, ws.name));
-    }
-  }
+  const wsEndpoints = deduped.filter(e => e.workspace === ws.name);
+  md += `### Workspace: ${ws.displayName}\n\n`;
+  md += `| Method | Endpoint Path | Auth Guard | Source File & Line | Description |\n`;
+  md += `| :--- | :--- | :--- | :--- | :--- |\n`;
 
-  // Deduplicate
-  const uniqueMap = new Map();
-  for (const ep of wsEndpoints) {
-    const key = `${ep.method}:${ep.path}:${ep.file}`;
-    if (!uniqueMap.has(key)) {
-      uniqueMap.set(key, ep);
+  if (wsEndpoints.length === 0) {
+    md += `| _- | _No route definitions found_ | _- | _- | _- |\n\n`;
+  } else {
+    for (const ep of wsEndpoints) {
+      const methodBadge = `\`${ep.method}\``;
+      md += `| ${methodBadge} | \`${ep.path}\` | ${ep.auth} | [\`${ep.file}#L${ep.line}\`](${ep.file}#L${ep.line}) | ${ep.description} |\n`;
     }
+    md += `\n`;
   }
-  const endpoints = Array.from(uniqueMap.values());
-  endpoints.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
-  catalogByWorkspace.set(ws, endpoints);
-  grandTotal += endpoints.length;
-  console.log(`  ✅ Extracted ${endpoints.length} endpoints from ${ws.name}`);
 }
 
-console.log(`\n🎉 Total API Endpoints Discovered across all workspaces: ${grandTotal}\n`);
-
-// Generate Markdown
-let tableMd = `<!-- API_CATALOG_START -->\n`;
-
-for (const [ws, endpoints] of catalogByWorkspace.entries()) {
-  tableMd += `### 🌐 ${ws.displayName}\n\n`;
-  tableMd += `| Method | Endpoint Route | Auth Guard | Description | Source File |\n`;
-  tableMd += `|:---|:---|:---|:---|:---|\n`;
-
-  for (const ep of endpoints) {
-    const methodBadge = ep.method === 'GET' ? `\`GET\`` 
-      : ep.method === 'POST' ? `\`POST\`` 
-      : ep.method === 'PUT' ? `\`PUT\`` 
-      : ep.method === 'PATCH' ? `\`PATCH\`` 
-      : `\`${ep.method}\``;
-
-    tableMd += `| ${methodBadge} | \`${ep.path}\` | ${ep.authGuard} | ${ep.description} | [${path.basename(ep.file)}:${ep.line}](file:///${ep.fullPath}#L${ep.line}) |\n`;
-  }
-  tableMd += `\n`;
-}
-tableMd += `<!-- API_CATALOG_END -->\n`;
-
+// Handle Output
 if (outputFile) {
-  fs.writeFileSync(path.resolve(rootDir, outputFile), tableMd, 'utf8');
-  console.log(`💾 API catalog saved to: ${outputFile}`);
+  const outPath = path.resolve(rootDir, outputFile);
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, md, 'utf8');
+  console.log(`💾 Written catalog to: ${outPath}`);
 }
 
-if (updateWiki || (!outputFile && fs.existsSync(path.resolve(rootDir, wikiPath)))) {
-  const targetWiki = path.resolve(rootDir, wikiPath);
-  if (fs.existsSync(targetWiki)) {
-    let wikiContent = fs.readFileSync(targetWiki, 'utf8');
-    if (wikiContent.includes('<!-- API_CATALOG_START -->') && wikiContent.includes('<!-- API_CATALOG_END -->')) {
+if (updateWiki) {
+  const resolvedWikiPath = path.resolve(rootDir, wikiPath);
+  if (fs.existsSync(resolvedWikiPath)) {
+    let wikiContent = fs.readFileSync(resolvedWikiPath, 'utf8');
+    const startTag = '<!-- AUTO-GENERATED-API-CATALOG:START -->';
+    const endTag = '<!-- AUTO-GENERATED-API-CATALOG:END -->';
+
+    const newBlock = `${startTag}\n\n${md}\n${endTag}`;
+
+    if (wikiContent.includes(startTag) && wikiContent.includes(endTag)) {
       wikiContent = wikiContent.replace(
-        /<!-- API_CATALOG_START -->[\s\S]*?<!-- API_CATALOG_END -->/,
-        tableMd.trim()
+        new RegExp(`${startTag}[\\s\\S]*?${endTag}`),
+        newBlock
       );
-      fs.writeFileSync(targetWiki, wikiContent, 'utf8');
-      console.log(`📝 Successfully patched Federated API catalog into: ${wikiPath}`);
     } else {
-      wikiContent += `\n\n## Automated Route Inventory\n\n${tableMd}\n`;
-      fs.writeFileSync(targetWiki, wikiContent, 'utf8');
-      console.log(`📝 Appended Federated API catalog to: ${wikiPath}`);
+      wikiContent += `\n\n${newBlock}\n`;
     }
+
+    fs.writeFileSync(resolvedWikiPath, wikiContent, 'utf8');
+    console.log(`✅ Patched API catalog into: ${resolvedWikiPath}`);
+  } else {
+    console.warn(`⚠️ Target wiki file does not exist: ${resolvedWikiPath}`);
   }
 }
 
 if (!outputFile && !updateWiki) {
-  console.log(tableMd);
+  console.log('\n' + md);
 }

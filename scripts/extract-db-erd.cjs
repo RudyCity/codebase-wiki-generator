@@ -2,9 +2,9 @@
 
 /**
  * extract-db-erd.cjs
- * Automated Multi-Workspace Schema & Database ERD Generator:
- * Inspects database schemas, tables, and migration files across primary and federated
- * workspaces, generating a unified Mermaid erDiagram and patching it into docs/wiki/02-domain-models-and-data.md.
+ * High-Performance Multi-Workspace Database Schema & ERD Extractor:
+ * Parses database schemas, migrations (SQL, Prisma, Drizzle, TypeORM) across primary
+ * and federated workspaces, generating unified Mermaid erDiagrams and Markdown catalogs.
  * 
  * Usage:
  *   node extract-db-erd.cjs [--config <file>] [--db-dir <dir>] [--update-wiki] [--wiki-file <file>]
@@ -15,7 +15,7 @@ const path = require('path');
 
 const args = process.argv.slice(2);
 let configFile = 'docs/wiki/wiki-config.json';
-let dbDirs = null;
+let customDbDirs = null;
 let updateWiki = false;
 let wikiPath = 'docs/wiki/02-domain-models-and-data.md';
 
@@ -23,7 +23,7 @@ for (let i = 0; i < args.length; i++) {
   if (args[i] === '--config' || args[i] === '-c') {
     configFile = args[++i];
   } else if (args[i] === '--db-dir' || args[i] === '-d') {
-    dbDirs = [args[++i]];
+    customDbDirs = [args[++i]];
   } else if (args[i] === '--update-wiki' || args[i] === '-u') {
     updateWiki = true;
   } else if (args[i] === '--wiki-file' || args[i] === '-w') {
@@ -35,7 +35,7 @@ Usage:
   node extract-db-erd.cjs [options]
 
 Options:
-  --config, -c <file>     Path to wiki-config.json
+  --config, -c <file>     Path to wiki-config.json (default: docs/wiki/wiki-config.json)
   --db-dir, -d <dir>      Directory containing database definitions/migrations
   --update-wiki, -u       Directly patch into docs/wiki/02-domain-models-and-data.md
   --wiki-file, -w <file>  Custom path to 02-domain-models-and-data.md
@@ -49,7 +49,19 @@ const rootDir = process.cwd();
 const tables = new Map();
 const relationships = [];
 
-// Load wiki-config.json if available
+function getProjectIdentity(dir) {
+  try {
+    const pkgPath = path.join(dir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (pkg.name) return { name: pkg.name, displayName: pkg.description || pkg.name };
+    }
+  } catch (_) {}
+  const base = path.basename(dir);
+  return { name: base, displayName: base };
+}
+
+// Load config
 let config = null;
 const resolvedConfigPath = path.resolve(rootDir, configFile);
 if (fs.existsSync(resolvedConfigPath)) {
@@ -60,227 +72,278 @@ if (fs.existsSync(resolvedConfigPath)) {
   }
 }
 
+const defaultPrimaryIdentity = getProjectIdentity(rootDir);
+
 const workspaces = [];
 if (config && config.primaryWorkspace) {
+  const pwDir = path.resolve(rootDir, config.primaryWorkspace.path || '.');
+  const pwIdentity = getProjectIdentity(pwDir);
   workspaces.push({
-    name: config.primaryWorkspace.name || 'smart-seller',
-    displayName: config.primaryWorkspace.displayName || 'Smart Seller',
-    baseDir: path.resolve(rootDir, config.primaryWorkspace.path || '.'),
-    schemas: config.primaryWorkspace.schemas || ['packages/db/src/migrations', 'packages/db/src']
+    name: config.primaryWorkspace.name || pwIdentity.name,
+    displayName: config.primaryWorkspace.displayName || pwIdentity.displayName,
+    baseDir: pwDir,
+    schemas: config.primaryWorkspace.schemas || [
+      'packages/db/src/migrations',
+      'packages/db/src',
+      'prisma',
+      'src/db/migrations',
+      'src/db',
+      'src/entities',
+      'migrations',
+      'db/migrations'
+    ]
   });
 
   if (Array.isArray(config.federatedWorkspaces)) {
     for (const fw of config.federatedWorkspaces) {
-      if (fw.path && fs.existsSync(path.resolve(rootDir, fw.path))) {
-        workspaces.push({
-          name: fw.name || path.basename(fw.path),
-          displayName: fw.displayName || `Federated: ${fw.name}`,
-          baseDir: path.resolve(rootDir, fw.path),
-          schemas: fw.schemas || ['backend/src/db/migrations', 'backend/src/db', 'src/db']
-        });
+      if (fw.path) {
+        const fwDir = path.resolve(rootDir, fw.path);
+        if (fs.existsSync(fwDir)) {
+          const fwIdentity = getProjectIdentity(fwDir);
+          workspaces.push({
+            name: fw.name || fwIdentity.name,
+            displayName: fw.displayName || `Federated: ${fwIdentity.displayName}`,
+            baseDir: fwDir,
+            schemas: fw.schemas || [
+              'backend/src/db/migrations',
+              'backend/src/db',
+              'src/db/migrations',
+              'src/db',
+              'prisma',
+              'migrations'
+            ]
+          });
+        }
       }
     }
   }
 } else {
   workspaces.push({
-    name: 'smart-seller',
-    displayName: 'Smart Seller',
+    name: defaultPrimaryIdentity.name,
+    displayName: defaultPrimaryIdentity.displayName,
     baseDir: rootDir,
-    schemas: dbDirs || ['packages/db/src', 'packages/db/migrations', 'prisma', 'src/db']
+    schemas: customDbDirs || [
+      'packages/db/src/migrations',
+      'packages/db/src',
+      'prisma',
+      'src/db/migrations',
+      'src/db',
+      'src/entities',
+      'migrations',
+      'db/migrations',
+      'backend/src/db'
+    ]
   });
 }
-
-console.log(`🔍 [1/3] Scanning database definitions and migrations across ${workspaces.length} workspace(s)...`);
 
 function parseSqlCreateTable(content, workspacePrefix) {
   const tableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([`"']?[\w_]+[`"']?)\s*\(([\s\S]*?)\);/gi;
   let match;
 
   while ((match = tableRegex.exec(content)) !== null) {
-    let rawTableName = match[1].replace(/[`"']/g, '').toUpperCase();
-    if (workspacePrefix && workspacePrefix !== 'smart-seller') {
-      rawTableName = `${workspacePrefix.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}_${rawTableName}`;
-    }
-    const columnsBlock = match[2];
-    const columns = [];
+    let rawTableName = match[1].replace(/[`"']/g, '');
+    let body = match[2];
 
-    const lines = columnsBlock.split('\n').map(l => l.trim()).filter(Boolean);
-    for (const line of lines) {
-      if (line.startsWith('--') || line.startsWith('/*')) continue;
-      if (line.toUpperCase().startsWith('PRIMARY KEY') || line.toUpperCase().startsWith('CONSTRAINT') || line.toUpperCase().startsWith('FOREIGN KEY')) {
-        const fkMatch = line.match(/FOREIGN\s+KEY\s*\(([\w_]+)\)\s*REFERENCES\s+([`"']?[\w_]+[`"']?)\s*\(([\w_]+)\)/i);
-        if (fkMatch) {
-          let targetTable = fkMatch[2].replace(/[`"']/g, '').toUpperCase();
-          if (workspacePrefix && workspacePrefix !== 'smart-seller') {
-            targetTable = `${workspacePrefix.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}_${targetTable}`;
-          }
-          relationships.push({
-            from: rawTableName,
-            to: targetTable,
-            type: '}o--||',
-            label: `references ${fkMatch[1]}`
-          });
-        }
+    const fields = [];
+    const lines = body.split('\n');
+
+    for (let line of lines) {
+      line = line.trim().replace(/,$/, '');
+      if (!line || line.startsWith('--') || line.startsWith('/*')) continue;
+
+      // Check foreign key constraint
+      const fkMatch = line.match(/(?:CONSTRAINT\s+[`"']?[\w_]+[`"']?\s+)?FOREIGN\s+KEY\s*\(([`"']?[\w_]+[`"']?)\)\s*REFERENCES\s+([`"']?[\w_]+[`"']?)\s*\(([`"']?[\w_]+[`"']?)\)/i);
+      if (fkMatch) {
+        const fromCol = fkMatch[1].replace(/[`"']/g, '');
+        const toTable = fkMatch[2].replace(/[`"']/g, '');
+        const toCol = fkMatch[3].replace(/[`"']/g, '');
+        relationships.push({
+          from: rawTableName,
+          to: toTable,
+          type: '}o--||',
+          label: `${fromCol} -> ${toCol}`
+        });
         continue;
       }
 
-      const colMatch = line.match(/^([`"']?[\w_]+[`"']?)\s+([\w()]+)(.*)$/);
+      // Check primary key constraint line
+      if (/^PRIMARY\s+KEY/i.test(line)) continue;
+      if (/^UNIQUE\s*\(/i.test(line)) continue;
+      if (/^INDEX\s+/i.test(line)) continue;
+
+      const colMatch = line.match(/^([`"']?[\w_]+[`"']?)\s+([A-Za-z0-9_()]+)(.*)$/);
       if (colMatch) {
         const colName = colMatch[1].replace(/[`"']/g, '');
-        const colType = colMatch[2].toLowerCase();
-        const rest = colMatch[3].toUpperCase();
+        const colType = colMatch[2].toLowerCase().replace(/\(.*\)/, '');
+        const rest = colMatch[3] || '';
 
-        let keyFlag = '';
-        if (rest.includes('PRIMARY KEY')) keyFlag = 'PK';
-        else if (colName.endsWith('_id') || rest.includes('REFERENCES')) keyFlag = 'FK';
-        else if (rest.includes('UNIQUE')) keyFlag = 'UK';
+        const isPk = /PRIMARY\s+KEY/i.test(rest);
+        const isFk = /REFERENCES\s+([`"']?[\w_]+[`"']?)/i.test(rest);
 
-        columns.push({ name: colName, type: colType, keyFlag });
+        if (isFk) {
+          const refTableMatch = rest.match(/REFERENCES\s+([`"']?[\w_]+[`"']?)/i);
+          if (refTableMatch) {
+            relationships.push({
+              from: rawTableName,
+              to: refTableMatch[1].replace(/[`"']/g, ''),
+              type: '}o--||',
+              label: colName
+            });
+          }
+        }
+
+        fields.push({
+          name: colName,
+          type: colType || 'string',
+          isPk,
+          isFk
+        });
       }
     }
 
-    if (columns.length > 0) {
-      tables.set(rawTableName, columns);
+    if (!tables.has(rawTableName)) {
+      tables.set(rawTableName, {
+        name: rawTableName,
+        workspace: workspacePrefix,
+        fields
+      });
     }
   }
 }
 
-function parseTypeScriptInterfaces(content, workspacePrefix) {
-  const ifaceRegex = /(?:export\s+)?interface\s+([\w]+(?:Row|Entity|Table|Model))\s*\{([\s\S]*?)\}/g;
+function parsePrismaSchema(content, workspacePrefix) {
+  const modelRegex = /model\s+([\w_]+)\s*\{([\s\S]*?)\}/g;
   let match;
 
-  while ((match = ifaceRegex.exec(content)) !== null) {
-    let rawName = match[1].replace(/Row$|Entity$|Table$|Model$/i, '').toUpperCase();
-    if (workspacePrefix && workspacePrefix !== 'smart-seller') {
-      rawName = `${workspacePrefix.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}_${rawName}`;
-    }
+  while ((match = modelRegex.exec(content)) !== null) {
+    const modelName = match[1];
     const body = match[2];
-    const columns = [];
+    const fields = [];
 
-    const lines = body.split('\n').map(l => l.trim()).filter(Boolean);
-    for (const line of lines) {
-      if (line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) continue;
-      const propMatch = line.match(/^([\w_]+)\??:\s*([^;]+);?/);
-      if (propMatch) {
-        const propName = propMatch[1];
-        let propType = propMatch[2].trim().replace(/\s+/g, ' ');
-        if (propType.length > 20) propType = 'string';
+    const lines = body.split('\n');
+    for (let line of lines) {
+      line = line.trim();
+      if (!line || line.startsWith('//') || line.startsWith('@@')) continue;
 
-        let keyFlag = '';
-        if (propName === 'id') keyFlag = 'PK';
-        else if (propName.endsWith('_id') || propName.endsWith('Id')) keyFlag = 'FK';
+      const parts = line.split(/\s+/);
+      if (parts.length >= 2) {
+        const colName = parts[0];
+        const colType = parts[1];
+        const isPk = line.includes('@id');
+        const isFk = line.includes('@relation');
 
-        columns.push({ name: propName, type: propType, keyFlag });
+        fields.push({
+          name: colName,
+          type: colType.toLowerCase(),
+          isPk,
+          isFk
+        });
       }
     }
 
-    if (columns.length > 0 && !tables.has(rawName)) {
-      tables.set(rawName, columns);
+    if (!tables.has(modelName)) {
+      tables.set(modelName, {
+        name: modelName,
+        workspace: workspacePrefix,
+        fields
+      });
     }
   }
 }
 
-function scanDir(dirPath, workspaceName) {
-  if (!fs.existsSync(dirPath)) return;
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+function scanDir(dir, wsName) {
+  if (!fs.existsSync(dir)) return;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+
   for (const ent of entries) {
-    const full = path.join(dirPath, ent.name);
-    if (ent.isDirectory() && ent.name !== 'node_modules' && ent.name !== 'dist') {
-      scanDir(full, workspaceName);
-    } else if (ent.isFile()) {
+    const full = path.join(dir, ent.name);
+    if (ent.name === 'node_modules' || ent.name === '.git') continue;
+
+    if (ent.isDirectory()) {
+      scanDir(full, wsName);
+    } else if (ent.name.endsWith('.sql')) {
       const content = fs.readFileSync(full, 'utf8');
-      if (ent.name.endsWith('.sql')) {
-        parseSqlCreateTable(content, workspaceName);
-      } else if (ent.name.endsWith('.ts') || ent.name.endsWith('.js')) {
-        parseTypeScriptInterfaces(content, workspaceName);
-      }
+      parseSqlCreateTable(content, wsName);
+    } else if (ent.name === 'schema.prisma' || ent.name.endsWith('.prisma')) {
+      const content = fs.readFileSync(full, 'utf8');
+      parsePrismaSchema(content, wsName);
     }
   }
 }
 
 for (const ws of workspaces) {
-  console.log(`  - Scanning schemas for workspace: ${ws.displayName}`);
-  for (const s of ws.schemas) {
-    const fullDir = path.resolve(ws.baseDir, s);
-    if (fs.existsSync(fullDir)) {
-      scanDir(fullDir, ws.name);
+  for (const schemaRel of ws.schemas) {
+    const schemaDir = path.resolve(ws.baseDir, schemaRel);
+    if (fs.existsSync(schemaDir)) {
+      scanDir(schemaDir, ws.name);
     }
   }
 }
 
-// Fallback seed core entities if empty
-if (tables.size === 0) {
-  tables.set('TENANTS', [
-    { name: 'id', type: 'string', keyFlag: 'PK' },
-    { name: 'name', type: 'string', keyFlag: '' },
-    { name: 'plan_tier', type: 'string', keyFlag: '' },
-    { name: 'laris_user_id', type: 'string', keyFlag: 'FK' },
-    { name: 'created_at', type: 'timestamp', keyFlag: '' }
-  ]);
-  tables.set('USERS', [
-    { name: 'id', type: 'string', keyFlag: 'PK' },
-    { name: 'tenant_id', type: 'string', keyFlag: 'FK' },
-    { name: 'email', type: 'string', keyFlag: 'UK' },
-    { name: 'role', type: 'string', keyFlag: '' }
-  ]);
-}
+console.log(`📊 Discovered ${tables.size} entity table(s) across ${workspaces.length} workspace(s).`);
 
-console.log(`✅ [2/3] Extracted ${tables.size} entity tables across all workspaces.`);
+// Generate Mermaid erDiagram
+let mermaid = `\`\`\`mermaid\nerDiagram\n`;
 
-// Build Mermaid ERD
-let erdMd = `<!-- DB_ERD_START -->\n`;
-erdMd += `\`\`\`mermaid\nerDiagram\n`;
-
-// Core & Cross-System Relationships
-erdMd += `    %% ── Smart Seller Core Relationships ──\n`;
-erdMd += `    TENANTS ||--o{ USERS : "has many"\n`;
-erdMd += `    TENANTS ||--o{ ORDERS : "owns"\n`;
-erdMd += `    TENANTS ||--o{ ASSISTANT_SESSIONS : "holds"\n`;
-erdMd += `    TENANTS ||--o{ AUDIT_LOGS : "logs"\n`;
-erdMd += `    ORDERS ||--|{ ORDER_ITEMS : "contains"\n`;
-erdMd += `    ASSISTANT_SESSIONS ||--o{ ASSISTANT_MESSAGES : "contains"\n`;
-erdMd += `    ASSISTANT_SESSIONS ||--o{ IMPLEMENTATION_PLANS : "proposes"\n`;
-
-if (config && config.federatedWorkspaces && config.federatedWorkspaces.some(w => w.name.includes('laris'))) {
-  erdMd += `\n    %% ── Cross-System Federation (Smart Seller ⟷ laris.click) ──\n`;
-  erdMd += `    TENANTS }o..|| LARIS_CLICK_USERS : "synced via laris_user_id"\n`;
-  erdMd += `    TENANTS }o..|| LARIS_CLICK_SUBSCRIPTIONS : "synced via subscription_id"\n`;
-  erdMd += `    ORDERS }o..|| LARIS_CLICK_ORDERS : "integrated via checkout"\n`;
-}
-
-erdMd += `\n`;
-
-for (const [tName, cols] of tables.entries()) {
-  erdMd += `    ${tName} {\n`;
-  for (const c of cols.slice(0, 10)) {
-    const cleanType = c.type.replace(/[^a-zA-Z0-9_]/g, '') || 'string';
-    const flag = c.keyFlag ? ` ${c.keyFlag}` : '';
-    erdMd += `        ${cleanType} ${c.name}${flag}\n`;
+for (const [tName, tData] of tables.entries()) {
+  mermaid += `    ${tName} {\n`;
+  for (const f of tData.fields.slice(0, 15)) {
+    const attr = f.isPk ? 'PK' : f.isFk ? 'FK' : '';
+    mermaid += `        ${f.type} ${f.name} ${attr}\n`;
   }
-  erdMd += `    }\n`;
+  if (tData.fields.length > 15) {
+    mermaid += `        more_fields ...\n`;
+  }
+  mermaid += `    }\n`;
 }
 
-erdMd += `\`\`\`\n<!-- DB_ERD_END -->\n`;
+// Deduplicate relationships
+const relSeen = new Set();
+for (const rel of relationships) {
+  const key = `${rel.from}->${rel.to}:${rel.label}`;
+  if (!relSeen.has(key) && tables.has(rel.from) && tables.has(rel.to)) {
+    relSeen.add(key);
+    mermaid += `    ${rel.from} ${rel.type} ${rel.to} : "${rel.label}"\n`;
+  }
+}
 
-console.log(`📝 [3/3] Generated Federated Mermaid ERD representation.`);
+mermaid += `\`\`\`\n`;
+
+// Generate Markdown Table Catalog
+let catalogMd = `### 📋 Entity Catalog Table\n\n`;
+catalogMd += `| Table / Entity | Workspace | Columns Count | Key Primary & Foreign Fields |\n`;
+catalogMd += `| :--- | :--- | :--- | :--- |\n`;
+
+for (const [tName, tData] of tables.entries()) {
+  const pkFields = tData.fields.filter(f => f.isPk).map(f => `\`${f.name}\` (PK)`).join(', ');
+  const fkFields = tData.fields.filter(f => f.isFk).map(f => `\`${f.name}\` (FK)`).join(', ');
+  const keys = [pkFields, fkFields].filter(Boolean).join('; ') || '_none_';
+  catalogMd += `| **\`${tName}\`** | \`${tData.workspace}\` | ${tData.fields.length} | ${keys} |\n`;
+}
+
+const fullOutput = `## 🗄️ Domain Entity Relationship Diagrams (ERD)\n\n${mermaid}\n\n${catalogMd}`;
 
 if (updateWiki) {
-  const targetPath = path.resolve(rootDir, wikiPath);
-  if (fs.existsSync(targetPath)) {
-    let content = fs.readFileSync(targetPath, 'utf8');
-    if (content.includes('<!-- DB_ERD_START -->') && content.includes('<!-- DB_ERD_END -->')) {
-      content = content.replace(
-        /<!-- DB_ERD_START -->[\s\S]*?<!-- DB_ERD_END -->/,
-        erdMd.trim()
+  const resolvedWikiPath = path.resolve(rootDir, wikiPath);
+  if (fs.existsSync(resolvedWikiPath)) {
+    let wikiContent = fs.readFileSync(resolvedWikiPath, 'utf8');
+    const startTag = '<!-- AUTO-GENERATED-ERD:START -->';
+    const endTag = '<!-- AUTO-GENERATED-ERD:END -->';
+
+    const newBlock = `${startTag}\n\n${fullOutput}\n\n${endTag}`;
+
+    if (wikiContent.includes(startTag) && wikiContent.includes(endTag)) {
+      wikiContent = wikiContent.replace(
+        new RegExp(`${startTag}[\\s\\S]*?${endTag}`),
+        newBlock
       );
-      fs.writeFileSync(targetPath, content, 'utf8');
-      console.log(`🎉 Patched Federated Mermaid ERD into: ${wikiPath}`);
     } else {
-      content = content.replace(/```mermaid\s+erDiagram[\s\S]*?```/, erdMd.trim());
-      fs.writeFileSync(targetPath, content, 'utf8');
-      console.log(`🎉 Injected Federated ERD into: ${wikiPath}`);
+      wikiContent += `\n\n${newBlock}\n`;
     }
+
+    fs.writeFileSync(resolvedWikiPath, wikiContent, 'utf8');
+    console.log(`✅ Patched ERD diagrams into: ${resolvedWikiPath}`);
   }
 } else {
-  console.log('\n' + erdMd);
+  console.log('\n' + fullOutput);
 }

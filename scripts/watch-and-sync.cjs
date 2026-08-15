@@ -10,7 +10,7 @@
  * watcher instances so only exactly ONE watcher process is running at all times.
  * 
  * Usage:
- *   node watch-and-sync.cjs [--config <file>] [--wiki-dir <dir>] [--debounce <ms>] [--stop]
+ *   node watch-and-sync.cjs [--config <file>] [--wiki-dir <dir>] [--debounce <ms>] [--stop] [--status]
  */
 
 const fs = require('fs');
@@ -26,6 +26,7 @@ let configFile = 'docs/wiki/wiki-config.json';
 let wikiDir = 'docs/wiki';
 let debounceMs = 600;
 let isStopCommand = false;
+let isStatusCommand = false;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--config' || args[i] === '-c') {
@@ -36,6 +37,8 @@ for (let i = 0; i < args.length; i++) {
     debounceMs = parseInt(args[++i], 10) || 600;
   } else if (args[i] === '--stop') {
     isStopCommand = true;
+  } else if (args[i] === '--status') {
+    isStatusCommand = true;
   } else if (args[i] === '--help' || args[i] === '-h') {
     console.log(`
 Multi-Workspace Real-Time Wiki Auto-Sync Watcher Daemon
@@ -46,6 +49,7 @@ Options:
   --config, -c <file>      Path to wiki-config.json (default: docs/wiki/wiki-config.json)
   --wiki-dir, -w <dir>     Destination wiki directory (default: docs/wiki)
   --debounce, -d <ms>      Debounce delay in milliseconds (default: 600)
+  --status                 Check if watcher daemon is currently running
   --stop                   Stop any currently running watcher daemon and exit
   --help, -h               Show this help message
     `);
@@ -53,42 +57,16 @@ Options:
   }
 }
 
-// Load config
-let config = null;
-const resolvedConfigPath = path.resolve(rootDir, configFile);
-if (fs.existsSync(resolvedConfigPath)) {
+function getProjectIdentity(dir) {
   try {
-    config = JSON.parse(fs.readFileSync(resolvedConfigPath, 'utf8'));
-  } catch (err) {
-    console.warn(`⚠️ Could not parse config ${configFile}: ${err.message}`);
-  }
-}
-
-const workspaces = [];
-if (config && config.primaryWorkspace) {
-  workspaces.push({
-    name: config.primaryWorkspace.name || 'smart-seller',
-    displayName: config.primaryWorkspace.displayName || 'Primary Core (smart-seller)',
-    baseDir: path.resolve(rootDir, config.primaryWorkspace.path || '.')
-  });
-
-  if (Array.isArray(config.federatedWorkspaces)) {
-    for (const fw of config.federatedWorkspaces) {
-      if (fw.path && fs.existsSync(path.resolve(rootDir, fw.path))) {
-        workspaces.push({
-          name: fw.name || path.basename(fw.path),
-          displayName: fw.displayName || `Federated: ${fw.name}`,
-          baseDir: path.resolve(rootDir, fw.path)
-        });
-      }
+    const pkgPath = path.join(dir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (pkg.name) return { name: pkg.name, displayName: pkg.description || pkg.name };
     }
-  }
-} else {
-  workspaces.push({
-    name: 'smart-seller',
-    displayName: 'Primary Core (smart-seller)',
-    baseDir: rootDir
-  });
+  } catch (_) {}
+  const base = path.basename(dir);
+  return { name: base, displayName: base };
 }
 
 function isPidRunning(pid) {
@@ -100,218 +78,191 @@ function isPidRunning(pid) {
   }
 }
 
-function killProcess(pid) {
+function terminatePid(pid) {
   try {
-    if (isPidRunning(pid) && pid !== process.pid) {
-      if (process.platform === 'win32') {
-        try {
-          execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
-        } catch (_) {
-          try { process.kill(pid, 'SIGTERM'); } catch (__) {}
-        }
-      } else {
-        try {
-          process.kill(pid, 'SIGTERM');
-        } catch (_) {
-          try { process.kill(pid, 'SIGKILL'); } catch (__) {}
-        }
-      }
-      return true;
+    if (process.platform === 'win32') {
+      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+    } else {
+      process.kill(pid, 'SIGTERM');
     }
-  } catch (_) {}
-  return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
+// Handle --status
+if (isStatusCommand) {
+  if (fs.existsSync(lockFilePath)) {
+    try {
+      const rawPid = fs.readFileSync(lockFilePath, 'utf8').trim();
+      const pid = parseInt(rawPid, 10);
+      if (!isNaN(pid) && isPidRunning(pid)) {
+        console.log(`🟢 Wiki Watcher Daemon is RUNNING (PID: ${pid}).`);
+        process.exit(0);
+      }
+    } catch (_) {}
+  }
+  console.log(`⚪ Wiki Watcher Daemon is NOT running.`);
+  process.exit(0);
+}
+
+// Handle --stop
 if (isStopCommand) {
   if (fs.existsSync(lockFilePath)) {
     try {
-      const lockData = JSON.parse(fs.readFileSync(lockFilePath, 'utf8'));
-      const oldPid = lockData.pid;
-      if (oldPid && isPidRunning(oldPid)) {
-        console.log(`🛑 Stopping active multi-workspace wiki watcher (PID: ${oldPid})...`);
-        killProcess(oldPid);
-        console.log(`✅ Wiki watcher daemon (PID: ${oldPid}) stopped.`);
-      } else {
-        console.log(`ℹ️ No active wiki watcher daemon running (stale PID ${oldPid}).`);
+      const rawPid = fs.readFileSync(lockFilePath, 'utf8').trim();
+      const pid = parseInt(rawPid, 10);
+      if (!isNaN(pid) && isPidRunning(pid)) {
+        console.log(`🛑 Stopping Wiki Watcher Daemon (PID: ${pid})...`);
+        terminatePid(pid);
+        console.log(`✅ Daemon stopped successfully.`);
       }
-      fs.unlinkSync(lockFilePath);
-    } catch (e) {
-      try { fs.unlinkSync(lockFilePath); } catch (_) {}
-    }
+    } catch (_) {}
+    try { fs.unlinkSync(lockFilePath); } catch (_) {}
   } else {
-    console.log(`ℹ️ No active wiki watcher lockfile found.`);
+    console.log(`ℹ️ No active Wiki Watcher Daemon found.`);
   }
   process.exit(0);
 }
 
-function enforceSingleton() {
-  if (fs.existsSync(lockFilePath)) {
-    try {
-      const content = fs.readFileSync(lockFilePath, 'utf8').trim();
-      const lockData = JSON.parse(content);
-      const oldPid = lockData.pid;
-
-      if (oldPid && oldPid !== process.pid && isPidRunning(oldPid)) {
-        console.log(`\n🔍 [Singleton Lock] Ditemukan instance wiki-watcher yang sedang berjalan (PID: ${oldPid}).`);
-        console.log(`🧹 Mematikan instance duplikat (PID: ${oldPid}) agar hanya ada 1 instance watcher aktif...`);
-        const killed = killProcess(oldPid);
-        if (killed) {
-          console.log(`✅ Instance duplikat (PID: ${oldPid}) berhasil dimatikan.`);
-        }
-        const start = Date.now();
-        while (Date.now() - start < 250) {}
-      }
-    } catch (_) {}
-  }
-
-  const currentLock = {
-    pid: process.pid,
-    startTime: new Date().toISOString(),
-    wikiDir: wikiDir,
-    cwd: rootDir,
-    workspaces: workspaces.map(w => ({ name: w.name, path: w.baseDir }))
-  };
-  fs.writeFileSync(lockFilePath, JSON.stringify(currentLock, null, 2), 'utf8');
-}
-
-function cleanupLock() {
+// Check Singleton PID
+if (fs.existsSync(lockFilePath)) {
   try {
-    if (fs.existsSync(lockFilePath)) {
-      const content = fs.readFileSync(lockFilePath, 'utf8').trim();
-      const data = JSON.parse(content);
-      if (data.pid === process.pid) {
-        fs.unlinkSync(lockFilePath);
-      }
+    const rawPid = fs.readFileSync(lockFilePath, 'utf8').trim();
+    const existingPid = parseInt(rawPid, 10);
+    if (!isNaN(existingPid) && existingPid !== process.pid && isPidRunning(existingPid)) {
+      console.log(`⚠️ Detected existing watcher daemon on PID ${existingPid}. Terminating old instance...`);
+      terminatePid(existingPid);
     }
   } catch (_) {}
 }
 
-process.on('exit', cleanupLock);
-process.on('SIGINT', () => { cleanupLock(); process.exit(0); });
-process.on('SIGTERM', () => { cleanupLock(); process.exit(0); });
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception in Multi-Workspace Wiki Watcher:', err);
-  cleanupLock();
-  process.exit(1);
-});
+// Write current process PID to lockfile
+try {
+  fs.writeFileSync(lockFilePath, String(process.pid), 'utf8');
+} catch (err) {
+  console.warn(`⚠️ Could not create PID lockfile: ${err.message}`);
+}
 
-enforceSingleton();
-
-console.log(`\n👁️‍🗨️ Starting Multi-Workspace Wiki Auto-Sync Watcher Daemon...`);
-console.log(`📁 Primary Workspace : ${rootDir}`);
-console.log(`🌐 Total Workspaces  : ${workspaces.length} (${workspaces.map(w => w.name).join(', ')})`);
-console.log(`📚 Target Wiki       : ${wikiDir}`);
-console.log(`⏱️ Debounce Delay    : ${debounceMs}ms`);
-console.log(`🔒 Singleton PID     : ${process.pid} (Single active instance guaranteed)\n`);
-
-let changedFilesQueue = new Set();
-let debounceTimer = null;
-let isSyncRunning = false;
-let pendingSyncAfterRun = false;
-
-function triggerSync() {
-  if (isSyncRunning) {
-    pendingSyncAfterRun = true;
-    return;
-  }
-
-  const filesList = Array.from(changedFilesQueue);
-  changedFilesQueue.clear();
-
-  if (filesList.length === 0) return;
-
-  isSyncRunning = true;
-  pendingSyncAfterRun = false;
-  const timestamp = new Date().toLocaleTimeString();
-  console.log(`\n[${timestamp}] ⚡ Detected ${filesList.length} changed files across workspaces. Triggering sync...`);
-  
-  try {
-    const filesParam = filesList.slice(0, 20).join(',');
-    execSync(`node "${syncerScript}" --config "${resolvedConfigPath}" --wiki-dir "${wikiDir}" --files "${filesParam}"`, {
-      cwd: rootDir,
-      stdio: 'inherit'
-    });
-  } catch (err) {
-    console.error(`[${timestamp}] ❌ Error running multi-workspace auto-sync:`, err.message);
-  } finally {
-    isSyncRunning = false;
-    if (pendingSyncAfterRun || changedFilesQueue.size > 0) {
-      setTimeout(triggerSync, 200);
-    }
+function cleanup() {
+  if (fs.existsSync(lockFilePath)) {
+    try {
+      const stored = fs.readFileSync(lockFilePath, 'utf8').trim();
+      if (parseInt(stored, 10) === process.pid) {
+        fs.unlinkSync(lockFilePath);
+      }
+    } catch (_) {}
   }
 }
 
-const ignoredPatterns = [
-  'node_modules', '.git', 'dist', 'build', '.turbo', '.next', '.vite',
-  'coverage', '.hallmark', 'cache', 'data/logs', 'data/uploads',
-  wikiDir.replace(/\\/g, '/'), '.log', '.wiki-watcher.pid', 'tmp', 'temp'
-];
+process.on('exit', cleanup);
+process.on('SIGINT', () => { cleanup(); process.exit(0); });
+process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 
-const allowedExtensions = new Set([
-  '.ts', '.tsx', '.js', '.mjs', '.cjs',
-  '.json', '.sql', '.prisma', '.yml', '.yaml', '.md'
-]);
-
-function shouldIgnore(filePath) {
-  const norm = filePath.replace(/\\/g, '/');
-  if (ignoredPatterns.some(pat => norm.includes(pat))) return true;
-  const baseName = path.basename(filePath);
-  if (baseName.startsWith('.') && !baseName.startsWith('.env')) return true;
-  if (baseName.endsWith('~') || baseName.endsWith('.swp') || baseName.endsWith('.tmp')) return true;
-  const ext = path.extname(filePath).toLowerCase();
-  if (baseName.startsWith('.env')) return false;
-  if (!ext || !allowedExtensions.has(ext)) return true;
-  return false;
+// Load Config
+let config = null;
+const resolvedConfigPath = path.resolve(rootDir, configFile);
+if (fs.existsSync(resolvedConfigPath)) {
+  try {
+    config = JSON.parse(fs.readFileSync(resolvedConfigPath, 'utf8'));
+  } catch (err) {
+    console.warn(`⚠️ Could not parse config ${configFile}: ${err.message}`);
+  }
 }
 
-function setupWorkspaceWatcher(ws) {
-  try {
-    fs.watch(ws.baseDir, { recursive: true }, (eventType, filename) => {
-      if (!filename) return;
-      const fullPath = path.join(ws.baseDir, filename);
-      if (shouldIgnore(fullPath)) return;
+const defaultPrimaryIdentity = getProjectIdentity(rootDir);
 
-      const taggedFile = ws.name === 'smart-seller' ? path.relative(rootDir, fullPath) : `[${ws.name}] ${filename}`;
-      changedFilesQueue.add(taggedFile);
+const workspaces = [];
+if (config && config.primaryWorkspace) {
+  const pwDir = path.resolve(rootDir, config.primaryWorkspace.path || '.');
+  const pwIdentity = getProjectIdentity(pwDir);
+  workspaces.push({
+    name: config.primaryWorkspace.name || pwIdentity.name,
+    displayName: config.primaryWorkspace.displayName || pwIdentity.displayName,
+    baseDir: pwDir
+  });
 
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(triggerSync, debounceMs);
-    });
-    console.log(`🟢 Watching Workspace: ${ws.displayName}`);
-  } catch (err) {
-    console.warn(`⚠️ Recursive watcher failed on ${ws.name} (${err.message}). Watching specific subfolders...`);
-    const subdirs = ['apps', 'packages', 'src', 'routes', 'backend', 'frontend', 'prisma', 'drizzle'];
-    for (const d of subdirs) {
-      const full = path.join(ws.baseDir, d);
-      if (fs.existsSync(full)) {
-        try {
-          fs.watch(full, { recursive: true }, (eventType, filename) => {
-            if (!filename) return;
-            const fullPath = path.join(full, filename);
-            if (shouldIgnore(fullPath)) return;
-            const taggedFile = ws.name === 'smart-seller' ? path.relative(rootDir, fullPath) : `[${ws.name}] ${d}/${filename}`;
-            changedFilesQueue.add(taggedFile);
-            if (debounceTimer) clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(triggerSync, debounceMs);
+  if (Array.isArray(config.federatedWorkspaces)) {
+    for (const fw of config.federatedWorkspaces) {
+      if (fw.path) {
+        const fwDir = path.resolve(rootDir, fw.path);
+        if (fs.existsSync(fwDir)) {
+          const fwIdentity = getProjectIdentity(fwDir);
+          workspaces.push({
+            name: fw.name || fwIdentity.name,
+            displayName: fw.displayName || `Federated: ${fwIdentity.displayName}`,
+            baseDir: fwDir
           });
-          console.log(`  - 🟢 Watching: ${ws.name}/${d}`);
-        } catch (_) {}
+        }
       }
     }
   }
+} else {
+  workspaces.push({
+    name: defaultPrimaryIdentity.name,
+    displayName: defaultPrimaryIdentity.displayName,
+    baseDir: rootDir
+  });
 }
+
+console.log(`\n👁️  Wiki Watcher Daemon started (PID: ${process.pid})`);
+console.log(`⏱️  Debounce delay: ${debounceMs}ms`);
+console.log(`📁 Monitored Workspaces (${workspaces.length}):`);
+for (const ws of workspaces) {
+  console.log(`  - ${ws.displayName} -> ${ws.baseDir}`);
+}
+console.log(`\nPress Ctrl+C or run 'wiki stop' to terminate.\n`);
+
+let syncTimer = null;
+const changedQueue = new Set();
+
+function triggerSync() {
+  if (syncTimer) clearTimeout(syncTimer);
+
+  syncTimer = setTimeout(() => {
+    const fileList = Array.from(changedQueue);
+    changedQueue.clear();
+
+    console.log(`\n🔔 Change detected in ${fileList.length} file(s). Running auto-sync...`);
+    try {
+      execSync(`node "${syncerScript}" --config "${resolvedConfigPath}"`, {
+        cwd: rootDir,
+        stdio: 'inherit'
+      });
+    } catch (err) {
+      console.error(`❌ Auto-sync failed: ${err.message}`);
+    }
+  }, debounceMs);
+}
+
+const ignoredPatterns = [
+  /[\\/]\.git([\\/]|$)/,
+  /[\\/]node_modules([\\/]|$)/,
+  /[\\/]dist([\\/]|$)/,
+  /[\\/]build([\\/]|$)/,
+  /[\\/]\.next([\\/]|$)/,
+  /[\\/]docs[\\/]wiki([\\/]|$)/,
+  /\.log$/,
+  /\.pid$/,
+  /\.lock$/,
+  /~$/
+];
 
 for (const ws of workspaces) {
-  setupWorkspaceWatcher(ws);
+  if (!fs.existsSync(ws.baseDir)) continue;
+
+  try {
+    fs.watch(ws.baseDir, { recursive: true }, (eventType, filename) => {
+      if (!filename) return;
+
+      const norm = filename.replace(/\\/g, '/');
+      if (ignoredPatterns.some(p => p.test(norm))) return;
+
+      changedQueue.add(path.join(ws.baseDir, filename));
+      triggerSync();
+    });
+  } catch (err) {
+    console.warn(`⚠️ Could not attach recursive watcher to ${ws.displayName}: ${err.message}`);
+  }
 }
-
-// Initial sync on start
-console.log(`\n🚀 Performing initial multi-workspace sync check on startup...`);
-try {
-  execSync(`node "${syncerScript}" --config "${resolvedConfigPath}" --wiki-dir "${wikiDir}" --git-diff`, {
-    cwd: rootDir,
-    stdio: 'inherit'
-  });
-} catch (_) {}
-
-console.log(`\n✨ Multi-Workspace Wiki Watcher Daemon is active (PID: ${process.pid}). Auto-syncing on every file save.`);

@@ -1,9 +1,12 @@
 {
   "name": "@rudycity/codebase-wiki-generator",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Multi-dimensional codebase wiki generation, C4 architecture diagrams, ERD extraction, API cataloging, and automatic real-time synchronization suite for Single and Federated Multi-Workspace projects.",
-  "main": "scripts/sync-wiki-on-change.cjs",
+  "main": "index.cjs",
+  "types": "index.d.ts",
   "bin": {
+    "wiki": "./bin/cli.cjs",
+    "codebase-wiki-generator": "./bin/cli.cjs",
     "wiki-scaffold": "./scripts/generate-wiki-scaffold.cjs",
     "wiki-sync": "./scripts/sync-wiki-on-change.cjs",
     "wiki-watch": "./scripts/watch-and-sync.cjs",
@@ -12,6 +15,7 @@
     "wiki-extract-api": "./scripts/extract-api-catalog.cjs",
     "wiki-extract-erd": "./scripts/extract-db-erd.cjs",
     "wiki-rmemory": "./scripts/sync-wiki-to-rmemory.cjs",
+    "wiki-install-skill": "./scripts/install-skill.cjs",
     "wiki-hooks": "./scripts/setup-git-hooks.cjs"
   },
   "scripts": {
@@ -23,6 +27,7 @@
     "extract:api": "node scripts/extract-api-catalog.cjs",
     "extract:erd": "node scripts/extract-db-erd.cjs",
     "rmemory": "node scripts/sync-wiki-to-rmemory.cjs",
+    "install:skill": "node scripts/install-skill.cjs",
     "setup:hooks": "node scripts/setup-git-hooks.cjs"
   },
   "keywords": [
@@ -34,11 +39,21 @@
     "erd-generator",
     "api-catalog",
     "auto-sync",
-    "multi-workspace"
+    "multi-workspace",
+    "hono",
+    "express",
+    "fastify",
+    "nextjs",
+    "prisma",
+    "drizzle"
   ],
   "author": "RudyCity",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RudyCity/codebase-wiki-generator.git"
   }
 }
