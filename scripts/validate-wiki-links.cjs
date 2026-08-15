@@ -2,9 +2,9 @@
 
 /**
  * validate-wiki-links.cjs
- * Scans all markdown documentation in the wiki folder and verifies:
- * 1. Internal relative link integrity (no broken .md links).
- * 2. Section anchor target validity (#heading-slug).
+ * Cross-Platform Wiki Link and Integrity Validator:
+ * 1. Internal relative link integrity (no broken .md links or code file links).
+ * 2. Section anchor target validity (#heading-slug for .md files with CRLF/LF normalization).
  * 3. Mermaid code block syntax delimiters.
  * 
  * Usage:
@@ -58,14 +58,15 @@ function slugify(heading) {
     .replace(/\s+/g, '-');
 }
 
-// 1. Index headings across all files
+// 1. Index headings across all markdown files
 for (const file of mdFiles) {
   const fullPath = path.join(resolvedWiki, file);
-  const content = fs.readFileSync(fullPath, 'utf8');
+  const content = fs.readFileSync(fullPath, 'utf8').replace(/\r/g, '');
   const lines = content.split('\n');
   const slugs = new Set();
 
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
     const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
     if (headingMatch) {
       slugs.add(slugify(headingMatch[1]));
@@ -79,7 +80,7 @@ console.log(`🔗 [2/3] Checking link integrity and Mermaid diagrams...`);
 
 for (const file of mdFiles) {
   const fullPath = path.join(resolvedWiki, file);
-  const content = fs.readFileSync(fullPath, 'utf8');
+  const content = fs.readFileSync(fullPath, 'utf8').replace(/\r/g, '');
 
   // Check Mermaid blocks
   const mermaidMatches = (content.match(/```mermaid/g) || []).length;
@@ -93,13 +94,15 @@ for (const file of mdFiles) {
     const target = match[2].trim();
     totalLinksChecked++;
 
-    // Ignore external URLs or file:/// links
-    if (target.startsWith('http://') || target.startsWith('https://') || target.startsWith('mailto:') || target.startsWith('file:///')) {
+    // Ignore external URLs, protocols or file:/// links
+    if (target.startsWith('http://') || target.startsWith('https://') || target.startsWith('mailto:') || target.startsWith('file:///') || target.startsWith('data:')) {
       continue;
     }
 
     // Split target into file path and hash anchor
-    const [relPath, anchor] = target.split('#');
+    const [rawRelPath, rawAnchor] = target.split('#');
+    const relPath = rawRelPath ? rawRelPath.trim() : '';
+    const anchor = rawAnchor ? rawAnchor.trim() : '';
     
     // Internal anchor in the same file
     if (!relPath && anchor) {
@@ -117,7 +120,6 @@ for (const file of mdFiles) {
 
     // Relative file link
     if (relPath) {
-      const targetFile = path.basename(relPath);
       const targetFullPath = path.resolve(resolvedWiki, relPath);
 
       if (!fs.existsSync(targetFullPath)) {
@@ -127,7 +129,9 @@ for (const file of mdFiles) {
           target,
           reason: `Target file does not exist: ${relPath}`
         });
-      } else if (anchor) {
+      } else if (anchor && relPath.endsWith('.md')) {
+        // Only validate anchor slugs if target is a Markdown file
+        const targetFile = path.basename(relPath);
         const targetSlugs = headingsMap.get(targetFile);
         if (targetSlugs && !targetSlugs.has(anchor.toLowerCase())) {
           linkErrors.push({
