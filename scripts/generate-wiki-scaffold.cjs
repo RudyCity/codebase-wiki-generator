@@ -18,12 +18,17 @@ const crypto = require('crypto');
 const args = process.argv.slice(2);
 let targetDir = 'docs/wiki';
 let force = false;
+let isModular = true;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--target' || args[i] === '-t') {
     targetDir = args[++i];
   } else if (args[i] === '--force' || args[i] === '-f') {
     force = true;
+  } else if (args[i] === '--modular' || args[i] === '-m') {
+    isModular = true;
+  } else if (args[i] === '--no-modular') {
+    isModular = false;
   } else if (args[i] === '--help' || args[i] === '-h') {
     console.log(`
 Codebase Wiki Scaffold Generator
@@ -33,6 +38,8 @@ Usage:
 Options:
   --target, -t <dir>   Destination directory for wiki (default: docs/wiki)
   --force, -f          Overwrite existing wiki files
+  --modular, -m        Enable modular anti-monolith schemas and API domain files (default: true)
+  --no-modular         Disable modular generation (classic single-file mode)
   --help, -h           Show this help message
     `);
     process.exit(0);
@@ -166,6 +173,7 @@ if (!fs.existsSync(configPath) || force) {
   const defaultConfig = {
     wikiDir: targetDir.replace(/\\/g, '/'),
     title: `${projectName} Technical Wiki`,
+    modular: isModular,
     primaryWorkspace: {
       name: projectName,
       displayName: projectDesc || projectName,
@@ -181,7 +189,15 @@ if (!fs.existsSync(configPath) || force) {
   console.log(`  + Created: wiki-config.json`);
 }
 
+if (isModular) {
+  const schemasDir = path.join(resolvedTarget, 'schemas');
+  const apiDir = path.join(resolvedTarget, 'api');
+  if (!fs.existsSync(schemasDir)) fs.mkdirSync(schemasDir, { recursive: true });
+  if (!fs.existsSync(apiDir)) fs.mkdirSync(apiDir, { recursive: true });
+}
+
 console.log(`\n🎉 [4/4] Wiki Scaffolding Complete!`);
 console.log(`  Pages Created: ${writtenCount}, Skipped: ${skippedCount}`);
 console.log(`  Config File  : ${configPath}`);
+console.log(`  Modular Mode : ${isModular ? 'Enabled (Anti-Monolith schemas/ & api/)' : 'Disabled'}`);
 console.log(`\n💡 Run 'npx codebase-wiki-generator sync' to populate live API endpoints and database ERD!`);

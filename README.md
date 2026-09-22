@@ -9,8 +9,9 @@ Compatible as an **AI Agent Skill** (Antigravity, Claude Code, Cursor, Codex) or
 ## 🚀 Key Features
 
 * **Complete Architecture Wiki Scaffolding**: Automatically creates structured 8-pillar wiki documentation (`00-index.md` to `07-adrs-and-decisions.md`).
+* **Modular Anti-Monolith Architecture**: Supports `"modular": true` (or `--modular`) to split massive 100+ table databases and 500+ endpoint catalogs into compact, bite-sized files (`schemas/*.md` and `api/*.md`), preventing AI agent context exhaustion.
 * **Automated API Cataloging**: Scans routes (`Hono`, `Express`, `Fastify`, `Next.js App Router`, `NestJS`, `Elysia`, `Koa`) and generates complete endpoint tables with method, path, source line, and auth guards.
-* **Automated ERD & Schema Extraction**: Scans SQL migrations (`CREATE TABLE`, `FOREIGN KEY`), `Prisma`, `Drizzle`, or `TypeORM` schemas and outputs Mermaid Entity Relationship Diagrams.
+* **Automated ERD & Schema Extraction**: Scans SQL migrations (`CREATE TABLE`, `FOREIGN KEY`), `Prisma`, and `Drizzle ORM` (`pgTable`, `sqliteTable`, `mysqlTable`, `relations`) schemas and outputs Mermaid Entity Relationship Diagrams.
 * **Smart Singleton Watcher Daemon**: Watches file changes across primary and federated workspaces and automatically synchronizes the wiki in real-time with duplicate PID auto-kill.
 * **Semantic RAG Memory Sync**: Auto-chunks wiki pages into vector/JSON embeddings for AI assistants and customer agents (`rMemory`).
 * **Wiki Link & Freshness Auditing**: Scans broken internal links, anchors, and flags outdated pages against recent Git commit hashes.
@@ -88,6 +89,7 @@ Supports single repositories and federated multi-workspace setups:
 {
   "wikiDir": "docs/wiki",
   "title": "Project Architecture & Technical Wiki",
+  "modular": true,
   "primaryWorkspace": {
     "name": "my-main-app",
     "displayName": "Main Application",
@@ -116,12 +118,14 @@ Supports single repositories and federated multi-workspace setups:
 docs/wiki/
 ├── 00-index.md                    # Master index, system topology, package inventory
 ├── 01-architecture-overview.md    # C4 Container/Context models, tech stack matrix
-├── 02-domain-models-and-data.md   # Entity models, Mermaid ERD, state machines
-├── 03-api-and-contracts.md        # API Catalog, endpoints, auth guards, Zod schemas
+├── 02-domain-models-and-data.md   # Entity models, Mermaid ERD (Links to schemas/)
+├── 03-api-and-contracts.md        # API Catalog, endpoints, auth matrix (Links to api/)
 ├── 04-features-and-workflows.md   # Domain features, sequence diagrams, failure recovery
 ├── 05-infrastructure-and-devops.md# Docker topologies, env variables, logging architecture
 ├── 06-developer-onboarding.md     # 5-minute onboarding, commands, debugging runbooks
 ├── 07-adrs-and-decisions.md       # Architecture Decision Records (MADR format)
+├── schemas/                       # [Modular Mode] Individual entity specifications (3-5 KB each)
+├── api/                           # [Modular Mode] Individual domain route catalogs (5-10 KB each)
 └── wiki-config.json               # Declarative workspace federation configuration
 ```
 

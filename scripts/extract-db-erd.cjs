@@ -17,6 +17,7 @@ const args = process.argv.slice(2);
 let configFile = 'docs/wiki/wiki-config.json';
 let customDbDirs = null;
 let updateWiki = false;
+let isModular = false;
 let wikiPath = 'docs/wiki/02-domain-models-and-data.md';
 
 for (let i = 0; i < args.length; i++) {
@@ -26,6 +27,8 @@ for (let i = 0; i < args.length; i++) {
     customDbDirs = [args[++i]];
   } else if (args[i] === '--update-wiki' || args[i] === '-u') {
     updateWiki = true;
+  } else if (args[i] === '--modular' || args[i] === '-m') {
+    isModular = true;
   } else if (args[i] === '--wiki-file' || args[i] === '-w') {
     wikiPath = args[++i];
   } else if (args[i] === '--help' || args[i] === '-h') {
@@ -37,6 +40,7 @@ Usage:
 Options:
   --config, -c <file>     Path to wiki-config.json (default: docs/wiki/wiki-config.json)
   --db-dir, -d <dir>      Directory containing database definitions/migrations
+  --modular, -m           Generate modular schema files in schemas/ (anti-monolith mode)
   --update-wiki, -u       Directly patch into docs/wiki/02-domain-models-and-data.md
   --wiki-file, -w <file>  Custom path to 02-domain-models-and-data.md
   --help, -h              Show this help message
@@ -67,6 +71,7 @@ const resolvedConfigPath = path.resolve(rootDir, configFile);
 if (fs.existsSync(resolvedConfigPath)) {
   try {
     config = JSON.parse(fs.readFileSync(resolvedConfigPath, 'utf8'));
+    if (config.modular) isModular = true;
   } catch (err) {
     console.warn(`⚠️ Could not parse config ${configFile}: ${err.message}`);
   }
@@ -251,13 +256,83 @@ function parsePrismaSchema(content, workspacePrefix) {
   }
 }
 
-function scanDir(dir, wsName) {
-  if (!fs.existsSync(dir)) return;
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
+function parseTsSchema(content, workspacePrefix) {
+  // Drizzle ORM: pgTable, sqliteTable, mysqlTable
+  const drizzleRegex = /(?:export\s+const\s+)?([\w_]+)\s*=\s*(?:pgTable|sqliteTable|mysqlTable)\s*\(\s*['"]([^'"]+)['"]\s*,\s*\{([\s\S]*?)\}\s*\)/g;
+  let match;
+  while ((match = drizzleRegex.exec(content)) !== null) {
+    const tableName = match[2];
+    const body = match[3];
+    const fields = [];
+    const colRegex = /([\w_]+)\s*:\s*([a-zA-Z0-9_]+)\s*\(/g;
+    let colMatch;
+    while ((colMatch = colRegex.exec(body)) !== null) {
+      const colName = colMatch[1];
+      const colType = colMatch[2].toLowerCase();
+      const isPk = colName === 'id' || body.includes(`${colName}.primaryKey()`);
+      const isFk = colName.endsWith('_id') || colName.endsWith('Id') || body.includes(`.references(`);
+      fields.push({
+        name: colName,
+        type: colType,
+        isPk,
+        isFk
+      });
+    }
+
+    if (!tables.has(tableName)) {
+      tables.set(tableName, {
+        name: tableName,
+        workspace: workspacePrefix,
+        fields
+      });
+    }
+  }
+
+  // Relations in Drizzle
+  const relRegex = /export\s+const\s+([\w_]+)\s*=\s*relations\s*\(\s*([\w_]+)\s*,\s*\(\s*\{\s*(one|many)\s*\}\s*\)\s*=>\s*\(\{([\s\S]*?)\}\)\s*\)/g;
+  let relMatch;
+  while ((relMatch = relRegex.exec(content)) !== null) {
+    const sourceTable = relMatch[2];
+    const relBody = relMatch[4];
+    const relFieldRegex = /([\w_]+)\s*:\s*(one|many)\s*\(\s*([\w_]+)/g;
+    let fieldMatch;
+    while ((fieldMatch = relFieldRegex.exec(relBody)) !== null) {
+      const targetTable = fieldMatch[3];
+      const cardinality = fieldMatch[2] === 'many' ? '}o--||' : '||--||';
+      relationships.push({
+        from: sourceTable,
+        to: targetTable,
+        type: cardinality,
+        label: fieldMatch[1]
+      });
+    }
+  }
+
+  parseSqlCreateTable(content, workspacePrefix);
+}
+
+function scanDir(targetPath, wsName) {
+  if (!fs.existsSync(targetPath)) return;
+  const stat = fs.statSync(targetPath);
+  if (stat.isFile()) {
+    if (targetPath.endsWith('.sql')) {
+      const content = fs.readFileSync(targetPath, 'utf8');
+      parseSqlCreateTable(content, wsName);
+    } else if (targetPath.endsWith('.prisma')) {
+      const content = fs.readFileSync(targetPath, 'utf8');
+      parsePrismaSchema(content, wsName);
+    } else if (targetPath.endsWith('.ts') || targetPath.endsWith('.js')) {
+      const content = fs.readFileSync(targetPath, 'utf8');
+      parseTsSchema(content, wsName);
+    }
+    return;
+  }
+
+  const entries = fs.readdirSync(targetPath, { withFileTypes: true });
 
   for (const ent of entries) {
-    const full = path.join(dir, ent.name);
-    if (ent.name === 'node_modules' || ent.name === '.git') continue;
+    const full = path.join(targetPath, ent.name);
+    if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === 'dist') continue;
 
     if (ent.isDirectory()) {
       scanDir(full, wsName);
@@ -267,6 +342,9 @@ function scanDir(dir, wsName) {
     } else if (ent.name === 'schema.prisma' || ent.name.endsWith('.prisma')) {
       const content = fs.readFileSync(full, 'utf8');
       parsePrismaSchema(content, wsName);
+    } else if (ent.name.endsWith('.ts') || ent.name.endsWith('.js')) {
+      const content = fs.readFileSync(full, 'utf8');
+      parseTsSchema(content, wsName);
     }
   }
 }
@@ -287,11 +365,19 @@ let mermaid = `\`\`\`mermaid\nerDiagram\n`;
 
 for (const [tName, tData] of tables.entries()) {
   mermaid += `    ${tName} {\n`;
-  for (const f of tData.fields.slice(0, 15)) {
+  const displayFields = isModular
+    ? tData.fields.filter(f => f.isPk || f.isFk).slice(0, 8)
+    : tData.fields.slice(0, 15);
+
+  if (displayFields.length === 0 && tData.fields.length > 0) {
+    displayFields.push(tData.fields[0]);
+  }
+
+  for (const f of displayFields) {
     const attr = f.isPk ? 'PK' : f.isFk ? 'FK' : '';
     mermaid += `        ${f.type} ${f.name} ${attr}\n`;
   }
-  if (tData.fields.length > 15) {
+  if (tData.fields.length > displayFields.length) {
     mermaid += `        more_fields ...\n`;
   }
   mermaid += `    }\n`;
@@ -309,22 +395,73 @@ for (const rel of relationships) {
 
 mermaid += `\`\`\`\n`;
 
+// Handle Modular Schema File Generation
+const resolvedWikiPath = path.resolve(rootDir, wikiPath);
+const wikiDirectory = path.dirname(resolvedWikiPath);
+
+if (isModular && updateWiki) {
+  const schemasDir = path.join(wikiDirectory, 'schemas');
+  if (!fs.existsSync(schemasDir)) {
+    fs.mkdirSync(schemasDir, { recursive: true });
+  }
+
+  for (const [tName, tData] of tables.entries()) {
+    const tableFileName = `${tName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}.md`;
+    const tableFilePath = path.join(schemasDir, tableFileName);
+
+    let tableMd = `# Entity Schema: \`${tName}\`\n\n`;
+    tableMd += `- **Workspace**: \`${tData.workspace}\`\n`;
+    tableMd += `- **Total Columns**: ${tData.fields.length}\n`;
+    tableMd += `- **Parent Document**: [02-domain-models-and-data.md](../${path.basename(resolvedWikiPath)})\n\n`;
+    tableMd += `## Columns Specification\n\n`;
+    tableMd += `| Column Name | Data Type | Key Constraint | Attributes |\n`;
+    tableMd += `| :--- | :--- | :--- | :--- |\n`;
+
+    for (const f of tData.fields) {
+      const keyStr = f.isPk ? '`PK` (Primary Key)' : f.isFk ? '`FK` (Foreign Key)' : '-';
+      tableMd += `| **\`${f.name}\`** | \`${f.type}\` | ${keyStr} | - |\n`;
+    }
+
+    const relatedRels = relationships.filter(r => r.from === tName || r.to === tName);
+    if (relatedRels.length > 0) {
+      tableMd += `\n## Entity Relationships\n\n`;
+      tableMd += `| Source Entity | Relationship | Target Entity | Label |\n`;
+      tableMd += `| :--- | :--- | :--- | :--- |\n`;
+      for (const r of relatedRels) {
+        tableMd += `| \`${r.from}\` | \`${r.type}\` | \`${r.to}\` | ${r.label} |\n`;
+      }
+    }
+
+    fs.writeFileSync(tableFilePath, tableMd, 'utf8');
+  }
+  console.log(`📑 Generated ${tables.size} modular schema specification file(s) in: ${schemasDir}`);
+}
+
 // Generate Markdown Table Catalog
 let catalogMd = `### 📋 Entity Catalog Table\n\n`;
-catalogMd += `| Table / Entity | Workspace | Columns Count | Key Primary & Foreign Fields |\n`;
-catalogMd += `| :--- | :--- | :--- | :--- |\n`;
+if (isModular) {
+  catalogMd += `| Table / Entity | Workspace | Columns Count | Key Primary & Foreign Fields | Detailed Schema Spec |\n`;
+  catalogMd += `| :--- | :--- | :--- | :--- | :--- |\n`;
+} else {
+  catalogMd += `| Table / Entity | Workspace | Columns Count | Key Primary & Foreign Fields |\n`;
+  catalogMd += `| :--- | :--- | :--- | :--- |\n`;
+}
 
 for (const [tName, tData] of tables.entries()) {
   const pkFields = tData.fields.filter(f => f.isPk).map(f => `\`${f.name}\` (PK)`).join(', ');
   const fkFields = tData.fields.filter(f => f.isFk).map(f => `\`${f.name}\` (FK)`).join(', ');
   const keys = [pkFields, fkFields].filter(Boolean).join('; ') || '_none_';
-  catalogMd += `| **\`${tName}\`** | \`${tData.workspace}\` | ${tData.fields.length} | ${keys} |\n`;
+  if (isModular) {
+    const tableFileName = `${tName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}.md`;
+    catalogMd += `| **\`${tName}\`** | \`${tData.workspace}\` | ${tData.fields.length} | ${keys} | [📄 View Schema](./schemas/${tableFileName}) |\n`;
+  } else {
+    catalogMd += `| **\`${tName}\`** | \`${tData.workspace}\` | ${tData.fields.length} | ${keys} |\n`;
+  }
 }
 
 const fullOutput = `## 🗄️ Domain Entity Relationship Diagrams (ERD)\n\n${mermaid}\n\n${catalogMd}`;
 
 if (updateWiki) {
-  const resolvedWikiPath = path.resolve(rootDir, wikiPath);
   if (fs.existsSync(resolvedWikiPath)) {
     let wikiContent = fs.readFileSync(resolvedWikiPath, 'utf8');
     const startTag = '<!-- AUTO-GENERATED-ERD:START -->';

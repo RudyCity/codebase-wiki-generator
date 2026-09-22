@@ -69,14 +69,24 @@ The generated wiki lives in `docs/wiki/` (or `.wiki/`) with the following standa
 docs/wiki/
 ├── 00-index.md                    # Master Table of Contents, Architecture Map & Tech Badges
 ├── 01-architecture-overview.md    # C4 Context & Container, Monorepo Topology, Design Principles
-├── 02-domain-models-and-data.md   # Mermaid ERD, DB Schema Catalog, State Machines, Caching
-├── 03-api-and-contracts.md        # REST/RPC Endpoints, Auth Specs, Payload Contracts, Webhooks
+├── 02-domain-models-and-data.md   # Mermaid ERD & Master Entity Index (Links to schemas/)
+├── 03-api-and-contracts.md        # API Architecture & Master Domain Index (Links to api/)
 ├── 04-features-and-workflows.md   # Core Business Flows, Sequence Diagrams, Logic Rules
 ├── 05-infrastructure-and-devops.md# Docker, CI/CD, Environment Matrix, Logging & Monitoring
 ├── 06-developer-onboarding.md     # Local Setup, Commands Cheat Sheet, Debugging, Testing Rules
 ├── 07-adrs-and-decisions.md       # Architecture Decision Records (ADRs) in MADR format
+├── schemas/                       # [Modular Mode] Granular schema specifications per entity (3-5 KB each)
+├── api/                           # [Modular Mode] Granular route catalogs per domain (5-10 KB each)
 └── auto-sync-manifest.json        # Auto-generated hash & file-mapping manifest for incremental sync
 ```
+
+### Modular (Anti-Monolith) Mode for AI Coding Agents
+In large codebases (e.g. 100+ database tables, 500+ endpoints), monolithic markdown files (150–250 KB) overwhelm LLM context windows, causing coding agents to bypass documentation and fall back to raw code parsing. 
+
+When `"modular": true` is configured in `wiki-config.json` (or `--modular` CLI flag is used):
+- **DB Schemas**: `02-domain-models-and-data.md` serves as an executive overview with high-level Mermaid ERD and links to granular table specs in `schemas/<table-name>.md`.
+- **API Catalogs**: `03-api-and-contracts.md` presents a high-level domain index and method matrix, linking to domain route files in `api/<domain>.md`.
+- **Token Efficiency**: AI agents can inspect single 3–5 KB files directly on-demand without context pollution.
 
 ---
 

@@ -25,6 +25,7 @@ let configFile = 'docs/wiki/wiki-config.json';
 let wikiDir = 'docs/wiki';
 let explicitFiles = [];
 let useGitDiff = true;
+let isModular = false;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--config' || args[i] === '-c') {
@@ -36,6 +37,8 @@ for (let i = 0; i < args.length; i++) {
     useGitDiff = false;
   } else if (args[i] === '--git-diff' || args[i] === '-g') {
     useGitDiff = true;
+  } else if (args[i] === '--modular' || args[i] === '-m') {
+    isModular = true;
   } else if (args[i] === '--help' || args[i] === '-h') {
     console.log(`
 Multi-Workspace Incremental Wiki Synchronizer
@@ -47,6 +50,7 @@ Options:
   --wiki-dir, -w <dir>      Directory containing wiki documentation (default: docs/wiki)
   --files, -f <file1,file2> Explicit list of changed files to process
   --git-diff, -g            Query git status across all workspaces (default)
+  --modular, -m             Propagate modular generation flag to extractors
   --help, -h                Show this help message
     `);
     process.exit(0);
@@ -80,6 +84,7 @@ const resolvedConfigPath = path.resolve(rootDir, configFile);
 if (fs.existsSync(resolvedConfigPath)) {
   try {
     config = JSON.parse(fs.readFileSync(resolvedConfigPath, 'utf8'));
+    if (config.modular) isModular = true;
   } catch (err) {
     console.warn(`⚠️ Could not parse config ${configFile}: ${err.message}`);
   }
@@ -219,11 +224,13 @@ console.log(`  - RAG Memory Chunking: ${needsRMemorySync ? '⚡ YES' : '➖ NO'}
 const scriptsDir = __dirname;
 
 // 3. Execute targeted extractors
+const modularFlag = isModular ? ' --modular' : '';
+
 if (needsApiSync) {
   try {
     const apiScript = path.join(scriptsDir, 'extract-api-catalog.cjs');
     if (fs.existsSync(apiScript)) {
-      execSync(`node "${apiScript}" --update-wiki --config "${resolvedConfigPath}"`, {
+      execSync(`node "${apiScript}" --update-wiki --config "${resolvedConfigPath}"${modularFlag}`, {
         cwd: rootDir,
         stdio: 'inherit'
       });
@@ -237,7 +244,7 @@ if (needsDbSync) {
   try {
     const dbScript = path.join(scriptsDir, 'extract-db-erd.cjs');
     if (fs.existsSync(dbScript)) {
-      execSync(`node "${dbScript}" --update-wiki --config "${resolvedConfigPath}"`, {
+      execSync(`node "${dbScript}" --update-wiki --config "${resolvedConfigPath}"${modularFlag}`, {
         cwd: rootDir,
         stdio: 'inherit'
       });
